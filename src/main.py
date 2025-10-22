@@ -13,7 +13,7 @@ def main(page: ft.Page):
     # --- Методи для роботи з даними ---
     def load_data():
         try:
-            with open("budget_data.json", "r", encoding="utf-8") as f:
+            with open("../budget_data.json", "r", encoding="utf-8") as f:
                 return json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             return {
@@ -54,7 +54,7 @@ def main(page: ft.Page):
             }
 
     def save_data():
-        with open("budget_data.json", "w", encoding="utf-8") as f:
+        with open("../budget_data.json", "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
 
     # Стан програми
