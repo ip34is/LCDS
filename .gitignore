@@ -1,5 +1,5 @@
 # база даних, яка взагалі не повинна бути на гітхабі 0_0
-budget_data.json
+src/budget_data.json
 
 # кеш
 __pycache__/
