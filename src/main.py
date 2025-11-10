@@ -2,20 +2,19 @@ import flet as ft
 import sqlite3
 from datetime import datetime
 import uuid
+import validation
 
 # Файл БД буде створено в папці src, бо тут знаходиться і головний файл
 DB_FILE = "budget.db"
 
 
 def get_db_conn():
-    """Створює нове підключення до БД. Це безпечно для потоків Flet."""
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def init_db():
-    """Ініціалізує БД та створює таблиці, якщо вони не існують."""
     with get_db_conn() as conn:
         c = conn.cursor()
         c.execute("""
@@ -72,7 +71,7 @@ def main(page: ft.Page):
 
     init_db()
 
-    # поля для вводу даних
+    # Поля вводу
     username_field = ft.TextField(label="Ім'я користувача", width=300)
     password_field = ft.TextField(label="Пароль", password=True, can_reveal_password=True, width=300)
     login_error_text = ft.Text(value="", color='red')
@@ -81,11 +80,16 @@ def main(page: ft.Page):
     register_info_text = ft.Text(value="", width=300, text_align=ft.TextAlign.CENTER)
     account_name_field = ft.TextField(label="Назва рахунку", width=300, autofocus=True)
     join_link_field = ft.TextField(label="Вставте ID рахунку для приєднання", width=300)
+    add_account_error_text = ft.Text(value="", color="red")
+
+    # Поля для додавання транзакцій
     transaction_amount_field = ft.TextField(label="Сума", keyboard_type=ft.KeyboardType.NUMBER, width=300,
                                             autofocus=True)
     transaction_desc_field = ft.TextField(label="Опис / Коментар", width=300)
     transaction_error_text = ft.Text(value="", color="red")
-    add_account_error_text = ft.Text(value="", color="red")
+    edit_transaction_amount_field = ft.TextField(label="Сума", keyboard_type=ft.KeyboardType.NUMBER, width=300)
+    edit_transaction_desc_field = ft.TextField(label="Опис / Коментар", width=300)
+    edit_transaction_error_text = ft.Text(value="", color="red")
 
     def handle_login(e):
         username = username_field.value
@@ -94,7 +98,6 @@ def main(page: ft.Page):
             c = conn.cursor()
             c.execute("SELECT password FROM users WHERE username = ?", (username,))
             user_data = c.fetchone()
-
         if user_data and user_data["password"] == password:
             page.session.set("current_user", username)
             update_view()
@@ -106,17 +109,10 @@ def main(page: ft.Page):
         username = new_username_field.value
         password = new_password_field.value
 
-        MIN_PASSWORD_LENGTH = 8
-        MIN_USERNAME_LENGTH = 2
+        is_valid, error_message = validation.validate_registration(username, password)
 
-        if not username or not password:
-            register_info_text.value = "Ім'я та пароль не можуть бути порожніми."
-            register_info_text.color = 'red'
-        elif len(username) < MIN_USERNAME_LENGTH:
-            register_info_text.value = f"Логін має бути не менше {MIN_USERNAME_LENGTH} символів."
-            register_info_text.color = 'red'
-        elif len(password) < MIN_PASSWORD_LENGTH:
-            register_info_text.value = f"Пароль має бути не менше {MIN_PASSWORD_LENGTH} символів."
+        if not is_valid:
+            register_info_text.value = error_message
             register_info_text.color = 'red'
         else:
             with get_db_conn() as conn:
@@ -145,14 +141,8 @@ def main(page: ft.Page):
                 INSERT INTO transactions (account_id, type, amount, description, timestamp, user_username)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (account_id, trans_type, amount, description, datetime.now().isoformat(), user_who_added))
-
             update_amount = amount if trans_type == "income" else -amount
-            c.execute("""
-                UPDATE accounts
-                SET balance = balance + ?
-                WHERE account_id = ?
-            """, (update_amount, account_id))
-
+            c.execute("UPDATE accounts SET balance = balance + ? WHERE account_id = ?", (update_amount, account_id))
             conn.commit()
 
     def handle_add_transaction(e):
@@ -161,53 +151,43 @@ def main(page: ft.Page):
         current_user = page.session.get("current_user")
         account_id = page.session.get("current_account_id")
 
-        try:
-            amount = float(transaction_amount_field.value)
-            description = transaction_desc_field.value.strip() or (
-                "Дохід" if trans_type == "income" else "Витрата"
-            )
-            add_transaction_logic(account_id, trans_type, amount, description, current_user)
-            transaction_amount_field.value = ""
-            transaction_desc_field.value = ""
-            go_to_view("account_details")
+        is_valid, amount = validation.validate_transaction_amount(transaction_amount_field.value)
 
-        except (ValueError, TypeError):
+        if not is_valid:
             print("Неправильна сума")
-            transaction_error_text.value = "Сума має бути числом (наприклад: 150.50)"
+            transaction_error_text.value = "Сума має бути додатнім числом (наприклад: 150.50)"
             page.update()
+            return
+
+        description = transaction_desc_field.value.strip() or (
+            "Дохід" if trans_type == "income" else "Витрата"
+        )
+        add_transaction_logic(account_id, trans_type, amount, description, current_user)
+        transaction_amount_field.value = ""
+        transaction_desc_field.value = ""
+        go_to_view("account_details")
 
     def handle_add_account(e):
         add_account_error_text.value = ""
         page.update()
-
         name = account_name_field.value.strip()
         current_user = page.session.get("current_user")
-
-        # --- ОСЬ ТУТ ЗМІНИ ---
         if not name:
             add_account_error_text.value = "Назва рахунку не може бути порожньою."
             page.update()
             return
-
         with get_db_conn() as conn:
             c = conn.cursor()
             c.execute("SELECT COUNT(*) FROM user_accounts_link WHERE username = ?", (current_user,))
             count = c.fetchone()[0]
-
             if count >= 4:
                 add_account_error_text.value = "Ви досягли ліміту в 4 рахунки."
                 page.update()
                 return
-
             new_id = str(uuid.uuid4())
-            c.execute("""
-                INSERT INTO accounts (account_id, name, balance, owner_username)
-                VALUES (?, ?, 0.0, ?)
-            """, (new_id, name, current_user))
-            c.execute("""
-                INSERT INTO user_accounts_link (username, account_id)
-                VALUES (?, ?)
-            """, (current_user, new_id))
+            c.execute("INSERT INTO accounts (account_id, name, balance, owner_username) VALUES (?, ?, 0.0, ?)",
+                      (new_id, name, current_user))
+            c.execute("INSERT INTO user_accounts_link (username, account_id) VALUES (?, ?)", (current_user, new_id))
             conn.commit()
             account_name_field.value = ""
             go_to_view(None)
@@ -215,30 +195,24 @@ def main(page: ft.Page):
     def handle_join_account(e):
         account_id_to_join = join_link_field.value.strip()
         current_user = page.session.get("current_user")
-
         with get_db_conn() as conn:
             c = conn.cursor()
-
             c.execute("SELECT * FROM accounts WHERE account_id = ?", (account_id_to_join,))
             if not c.fetchone():
                 print(f"Помилка: Рахунок з ID {account_id_to_join} не знайдено.")
                 return
-
             c.execute("SELECT COUNT(*) FROM user_accounts_link WHERE username = ?", (current_user,))
             if c.fetchone()[0] >= 4:
                 print(f"Помилка: Ви досягли ліміту в 4 рахунки.")
                 return
-
             c.execute("SELECT * FROM user_accounts_link WHERE username = ? AND account_id = ?",
                       (current_user, account_id_to_join))
             if c.fetchone():
                 print(f"Помилка: Рахунок вже у вашому списку.")
                 return
-
             c.execute("INSERT INTO user_accounts_link (username, account_id) VALUES (?, ?)",
                       (current_user, account_id_to_join))
             conn.commit()
-
             print(f"Рахунок {account_id_to_join} успішно додано!")
             join_link_field.value = ""
             go_to_view(None)
@@ -249,35 +223,97 @@ def main(page: ft.Page):
         if not account_id:
             go_to_view(None)
             return
-
         with get_db_conn() as conn:
             c = conn.cursor()
-
             c.execute("SELECT owner_username FROM accounts WHERE account_id = ?", (account_id,))
             account_data = c.fetchone()
-
             if account_data and account_data["owner_username"] == current_user:
                 print("Ви власник. Видалення рахунку...")
-                # 2a. Видаляємо всі зв'язки
                 c.execute("DELETE FROM user_accounts_link WHERE account_id = ?", (account_id,))
-                # 2b. Видаляємо всі транзакції
                 c.execute("DELETE FROM transactions WHERE account_id = ?", (account_id,))
-                # 2c. Видаляємо сам рахунок
                 c.execute("DELETE FROM accounts WHERE account_id = ?", (account_id,))
             else:
                 print("Ви не власник. Вихід з рахунку...")
                 c.execute("DELETE FROM user_accounts_link WHERE username = ? AND account_id = ?",
                           (current_user, account_id))
+            conn.commit()
+        go_to_view(None)
 
+    def handle_remove_participant(e, username_to_remove):
+        account_id = page.session.get("current_account_id")
+        with get_db_conn() as conn:
+            conn.execute("DELETE FROM user_accounts_link WHERE username = ? AND account_id = ?",
+                         (username_to_remove, account_id))
+            conn.commit()
+        update_view()
+
+    def handle_edit_transaction(e):
+        edit_transaction_error_text.value = ""
+        transaction_id = page.session.get("current_transaction_id")
+        account_id = page.session.get("current_account_id")
+
+        try:
+            new_amount = float(edit_transaction_amount_field.value)
+            new_description = edit_transaction_desc_field.value.strip()
+
+            if new_amount <= 0:
+                edit_transaction_error_text.value = "Сума має бути додатнім числом"
+                page.update()
+                return
+
+            with get_db_conn() as conn:
+                c = conn.cursor()
+                c.execute("SELECT amount, type FROM transactions WHERE transaction_id = ?", (transaction_id,))
+                old_tx = c.fetchone()
+                old_amount = old_tx["amount"]
+                tx_type = old_tx["type"]
+
+                c.execute("UPDATE transactions SET amount = ?, description = ? WHERE transaction_id = ?",
+                          (new_amount, new_description, transaction_id))
+
+                balance_change = 0.0
+                if tx_type == "income":
+                    balance_change = new_amount - old_amount
+                else:
+                    balance_change = old_amount - new_amount
+
+                c.execute("UPDATE accounts SET balance = balance + ? WHERE account_id = ?",
+                          (balance_change, account_id))
+                conn.commit()
+
+            go_to_view("account_details")
+
+        except (ValueError, TypeError):
+            edit_transaction_error_text.value = "Сума має бути числом (наприклад: 150.50)"
+            page.update()
+
+    def handle_delete_transaction(e):
+        transaction_id = page.session.get("current_transaction_id")
+        account_id = page.session.get("current_account_id")
+
+        with get_db_conn() as conn:
+            c = conn.cursor()
+            c.execute("SELECT amount, type FROM transactions WHERE transaction_id = ?", (transaction_id,))
+            tx = c.fetchone()
+            amount = tx["amount"]
+            tx_type = tx["type"]
+
+            c.execute("DELETE FROM transactions WHERE transaction_id = ?", (transaction_id,))
+
+            balance_change = -amount if tx_type == "income" else amount
+
+            c.execute("UPDATE accounts SET balance = balance + ? WHERE account_id = ?", (balance_change, account_id))
             conn.commit()
 
-        go_to_view(None)
+        go_to_view("account_details")
+
 
     def go_to_view(view_name):
         page.session.set("view", view_name)
         login_error_text.value = ""
         register_info_text.value = ""
         transaction_error_text.value = ""
+        edit_transaction_error_text.value = ""
         update_view()
 
     def open_account_details(account_id):
@@ -285,8 +321,21 @@ def main(page: ft.Page):
         go_to_view("account_details")
 
     def open_transaction_page(trans_type):
+        transaction_amount_field.value = ""
+        transaction_desc_field.value = ""
         page.session.set("transaction_type", trans_type)
         go_to_view("add_transaction")
+
+    def open_edit_transaction_page(transaction_id):
+        with get_db_conn() as conn:
+            tx = conn.execute("SELECT amount, description FROM transactions WHERE transaction_id = ?",
+                              (transaction_id,)).fetchone()
+
+        if tx:
+            edit_transaction_amount_field.value = str(tx["amount"])
+            edit_transaction_desc_field.value = tx["description"]
+            page.session.set("current_transaction_id", transaction_id)
+            go_to_view("edit_transaction")
 
     def build_login_view():
         return ft.Column(
@@ -319,7 +368,6 @@ def main(page: ft.Page):
                     ft.IconButton(ft.Icons.ARROW_BACK, on_click=lambda e: go_to_view(None), tooltip="Назад"),
                     ft.Container(expand=True)
                 ]),
-
                 ft.Text("Створення нового рахунку", size=20, weight=ft.FontWeight.BOLD),
                 account_name_field,
                 add_account_error_text,
@@ -327,9 +375,7 @@ def main(page: ft.Page):
                     [ft.FilledButton("Створити рахунок", on_click=handle_add_account)],
                     alignment=ft.MainAxisAlignment.END
                 ),
-
                 ft.Divider(height=30, thickness=2),
-
                 ft.Text("Або приєднатися за ID", size=18, weight=ft.FontWeight.BOLD),
                 join_link_field,
                 ft.Row(
@@ -350,6 +396,8 @@ def main(page: ft.Page):
             account = c.fetchone()
             c.execute("SELECT * FROM transactions WHERE account_id = ? ORDER BY timestamp DESC", (account_id,))
             transactions = c.fetchall()
+            c.execute("SELECT username FROM user_accounts_link WHERE account_id = ?", (account_id,))
+            participants = c.fetchall()
 
         if account is None:
             go_to_view(None);
@@ -365,11 +413,30 @@ def main(page: ft.Page):
                     conn.commit()
                 update_view()
 
-
         is_owner = (account["owner_username"] == current_user)
-
         delete_button_text = "Видалити рахунок (Ви Власник)" if is_owner else "Покинути рахунок"
         delete_button_icon = ft.Icons.DELETE_FOREVER if is_owner else ft.Icons.LOGOUT
+
+        participants_list_controls = []
+        if is_owner:
+            participants_list_controls.append(ft.Text("Учасники:", size=18))
+            for p in participants:
+                username = p["username"]
+                is_current_owner = (username == current_user)
+
+                participant_tile = ft.ListTile(
+                    leading=ft.Icon(ft.Icons.PERSON),
+                    title=ft.Text(f"{username} {'(Власник)' if is_current_owner else ''}"),
+                )
+
+                if not is_current_owner:
+                    participant_tile.trailing = ft.IconButton(
+                        icon=ft.Icons.REMOVE_CIRCLE_OUTLINE,
+                        icon_color="red",
+                        tooltip="Видалити учасника",
+                        on_click=lambda e, u=username: handle_remove_participant(e, u)
+                    )
+                participants_list_controls.append(participant_tile)
 
         left_column = ft.Column(
             [
@@ -385,15 +452,20 @@ def main(page: ft.Page):
                 ft.Text("Спільний доступ:", size=18),
                 ft.TextField(label="ID для запрошення (скопіюйте це)", value=f"{account_id}", read_only=True),
                 ft.Text(f"Власник: {account['owner_username']}", size=12, color="grey", italic=True),
+
                 ft.Divider(height=10),
                 ft.Text("Керування рахунком:", size=18),
                 rename_account_field,
                 ft.ElevatedButton("Перейменувати", icon=ft.Icons.DRIVE_FILE_RENAME_OUTLINE, on_click=handle_rename),
                 ft.ElevatedButton(delete_button_text, icon=delete_button_icon,
                                   on_click=lambda e: go_to_view("delete_account")),
+
+                ft.Divider(height=10),
+                *participants_list_controls
             ],
             width=350,
-            spacing=10
+            spacing=10,
+            scroll=ft.ScrollMode.AUTO  # скрол, якщо не вміщається
         )
 
         transactions_list = ft.ListView(spacing=5, height=600, expand=True)
@@ -403,19 +475,24 @@ def main(page: ft.Page):
             for t in transactions:
                 timestamp_str = datetime.fromisoformat(t['timestamp']).strftime('%Y-%m-%d %H:%M')
                 user_str = t['user_username']
+                transaction_id = t['transaction_id']
 
-                transactions_list.controls.append(ft.ListTile(
+                is_author = (user_str == current_user)
+
+                tx_tile = ft.ListTile(
                     leading=ft.Icon(ft.Icons.ARROW_UPWARD if t["type"] == "income" else ft.Icons.ARROW_DOWNWARD,
                                     color='green' if t["type"] == "income" else 'red'),
                     title=ft.Text(t['description']),
                     subtitle=ft.Text(f"{timestamp_str} - {user_str}"),
                     trailing=ft.Text(f"{'+' if t['type'] == 'income' else '-'}{t['amount']:.2f} грн",
-                                     weight=ft.FontWeight.BOLD)
-                ))
+                                     weight=ft.FontWeight.BOLD),
+                    on_click=(lambda e, id=transaction_id: open_edit_transaction_page(id)) if is_author else None
+                )
+                transactions_list.controls.append(tx_tile)
 
         right_column = ft.Column(
             [
-                ft.Text("Історія транзакцій:", size=18),
+                ft.Text("Історія транзакцій (клікніть на свою для редагування):", size=18),
                 transactions_list
             ],
             width=430
@@ -427,18 +504,16 @@ def main(page: ft.Page):
                 ft.Text(account["name"], size=24, weight=ft.FontWeight.BOLD, expand=True),
             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             ft.Divider(height=10),
-            ft.Row([left_column, right_column], spacing=20, vertical_alignment=ft.CrossAxisAlignment.START)
+            ft.Row([left_column, right_column], spacing=20, vertical_alignment=ft.CrossAxisAlignment.START, height=650)
+            # Задаємо висоту
         ], width=800, spacing=10)
 
     def build_add_transaction_view():
         account_id = page.session.get("current_account_id")
-
         with get_db_conn() as conn:
             account = conn.execute("SELECT name FROM accounts WHERE account_id = ?", (account_id,)).fetchone()
-
         trans_type = page.session.get("transaction_type")
         title = "Додати дохід" if trans_type == "income" else "Додати витрату"
-
         return ft.Column([
             ft.Row([
                 ft.IconButton(ft.Icons.ARROW_BACK, on_click=lambda e: go_to_view("account_details"), tooltip="Назад"),
@@ -457,19 +532,42 @@ def main(page: ft.Page):
             )
         ], width=800, spacing=20)
 
+    def build_edit_transaction_view():
+        account_id = page.session.get("current_account_id")
+        transaction_id = page.session.get("current_transaction_id")
+
+        with get_db_conn() as conn:
+            account = conn.execute("SELECT name FROM accounts WHERE account_id = ?", (account_id,)).fetchone()
+
+        return ft.Column([
+            ft.Row([
+                ft.IconButton(ft.Icons.ARROW_BACK, on_click=lambda e: go_to_view("account_details"), tooltip="Назад"),
+                ft.Container(expand=True),
+            ]),
+            ft.Text(f'Редагувати транзакцію в "{account["name"]}"', size=20, weight=ft.FontWeight.BOLD),
+            edit_transaction_amount_field,
+            edit_transaction_desc_field,
+            edit_transaction_error_text,
+            ft.Row(
+                [
+                    ft.TextButton("Скасувати", on_click=lambda e: go_to_view("account_details")),
+                    ft.FilledButton("Видалити транзакцію", on_click=handle_delete_transaction, color="red",
+                                    icon=ft.Icons.DELETE_FOREVER),
+                    ft.FilledButton("Зберегти зміни", on_click=handle_edit_transaction, icon=ft.Icons.SAVE)
+                ],
+                alignment=ft.MainAxisAlignment.END
+            )
+        ], width=800, spacing=20)
+
     def build_delete_confirmation_view():
         account_id = page.session.get("current_account_id")
         current_user = page.session.get("current_user")
-
         with get_db_conn() as conn:
             account = conn.execute("SELECT * FROM accounts WHERE account_id = ?", (account_id,)).fetchone()
-
         if account is None:
             go_to_view(None);
             return ft.Container()
-
         is_owner = (account["owner_username"] == current_user)
-
         if is_owner:
             title_text = "Видалити рахунок?"
             warning_text = f"Усі транзакції та баланс ({account['balance']:.2f} грн) будуть видалені НАЗАВЖДИ."
@@ -478,7 +576,6 @@ def main(page: ft.Page):
             title_text = "Покинути рахунок?"
             warning_text = "Ви втратите доступ до цього рахунку, але він залишиться в інших учасників."
             button_text = "Так, покинути"
-
         return ft.Column(
             [
                 ft.Text(title_text, size=24, weight=ft.FontWeight.BOLD),
@@ -500,20 +597,16 @@ def main(page: ft.Page):
 
     def build_main_view():
         current_user = page.session.get("current_user")
-
         with get_db_conn() as conn:
             c = conn.cursor()
             c.execute("SELECT account_id FROM user_accounts_link WHERE username = ?", (current_user,))
             user_account_ids_tuples = c.fetchall()
             user_account_ids = [row["account_id"] for row in user_account_ids_tuples]
-
             accounts = []
             if user_account_ids:
-                # цікавий момент, пов'язаний зі створенням плейсхолдерів '?' для запиту
                 placeholders = ','.join('?' for _ in user_account_ids)
                 c.execute(f"SELECT * FROM accounts WHERE account_id IN ({placeholders})", user_account_ids)
                 accounts = c.fetchall()
-
             all_transactions = []
             if user_account_ids:
                 c.execute(f"""
@@ -568,7 +661,6 @@ def main(page: ft.Page):
                 for t in all_transactions:
                     timestamp_str = datetime.fromisoformat(t['timestamp']).strftime('%Y-%m-%d %H:%M')
                     user_str = t['user_username']
-
                     transactions_list.controls.append(ft.ListTile(
                         leading=ft.Icon(ft.Icons.ARROW_UPWARD if t["type"] == "income" else ft.Icons.ARROW_DOWNWARD,
                                         color='green' if t["type"] == "income" else 'red'),
@@ -577,7 +669,6 @@ def main(page: ft.Page):
                         trailing=ft.Text(f"{'+' if t['type'] == 'income' else '-'}{t['amount']:.2f} грн",
                                          weight=ft.FontWeight.BOLD)
                     ))
-
             return ft.Column([
                 header,
                 ft.Text("Ваші рахунки:", size=18),
@@ -606,6 +697,8 @@ def main(page: ft.Page):
                 page.add(build_account_details_view())
             elif current_view == "add_transaction":
                 page.add(build_add_transaction_view())
+            elif current_view == "edit_transaction":
+                page.add(build_edit_transaction_view())
             elif current_view == "delete_account":
                 page.add(build_delete_confirmation_view())
             else:
